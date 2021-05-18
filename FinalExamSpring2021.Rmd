@@ -1,0 +1,694 @@
+---
+title: "Spring 2021 - Final Examination"
+author: "Zijun Yi"
+output: pdf_document
+---
+```{r echo=FALSE}
+library(caret)
+library(psych)
+library(tidyverse)
+library(viridis)
+library(dlookr)
+library(changepoint)
+library(car)
+library(nlme)
+library(gridExtra)
+library(DHARMa)
+library(lm.beta)
+library(performance)
+library(MCMCpack)
+.pardefault <- par()
+setwd("~/OneDrive/SU Semaster 10/IST 772/final")
+load('datasets20.RData')
+```
+
+# Instructions
+
+_Your goal for this final exam is to conduct the necessary analyses of vaccination rates in California school districts and then write up a technical report for a scientifically knowledgeable staff member in a California state legislator’s office. You should provide sufficient numeric and graphical detail that the staff member can create a comprehensive briefing for a legislator (see question 10 for specific points of interest). You can assume that the staff member understands the concept of statistical significance and other basic concepts like mean, standard deviation, and correlation. _ 
+
+_For this exam, the report writing is very important: Your responses will be graded on the basis of clarity; conciseness; inclusion and explanation of specific and appropriate statistical values; inclusion of both frequentist and Bayesian inferential evidence (i.e., it is not sufficient to just examine the data); explanation of any included tabular material and the appropriate use of graphical displays when/if necessary. It is also important to conduct a thorough analysis, including both data exploration and cleaning and appropriate diagnostics. Bonus points will be awarded for work that goes above expectations._
+
+_In your answer for each question, make sure you write a narrative with complete sentences that answers the substantive question. You can choose to put important statistical values into a table for readability, or you can include the statistics within your narrative. Be sure that you not only report what a test result was, but also what that result means substantively. Make sure to include enough statistical information so that another analytics professional could review your work. Your report can include graphics created by R, keeping in mind that if you do include a graphic, you will have to provide some accompanying narrative text to explain what it is doing in your report. Finally, be sure to proofread your final knitted submission to ensure that everything is included and readable._
+
+_You *may not* receive assistance, help, coaching, guidance, or support from any human except your instructor at any point during this exam. Your instructor will be available by email throughout the report writing period if you have questions, but don’t wait until the last minute!_ 
+
+## Data
+
+_You have an RData file available on Blackboard area that contains two data sets that pertain to vaccinations for the U.S. as a whole and for Californian school districts. The U.S. vaccine data is a time series and the California data is a sample of end-of-year vaccination reports from n=700 school districts. Here is a description of the datasets:_
+
+usVaccines – Time series data from the World Health Organization reporting vaccination rates in the U.S. for five common vaccines
+
+```{ eval=FALSE}
+Time-Series [1:38, 1:5] from 1980 to 2017: 
+ - attr(*, "dimnames")=List of 2
+  ..$ : NULL
+  ..$ : chr [1:5] "DTP1" "HepB_BD" "Pol3" "Hib3" “MCV1”... 
+```
+
+_(Note: DTP1 = First dose of Diphtheria/Pertussis/Tetanus vaccine (i.e., DTP); HepB_BD = Hepatitis B, Birth Dose (HepB); Pol3 = Polio third dose (Polio); Hib3 – Influenza third dose; MCV1 = Measles first dose (included in MMR))_ 
+
+districts – A sample of California public school districts from the 2017 data collection, along with specific numbers and percentages for each district: 
+
+```{ eval=FALSE}
+'data.frame':	700 obs. of  14 variables:
+ $ DistrictName    : Name of the district
+ $ WithDTP         : Percentage of students in the district with the DTP vaccine
+ $ WithPolio       : Percentage of students in the district with the Polio vaccine
+ $ WithMMR         : Percentage of students in the district with the MMR vaccine
+ $ WithHepB        : Percentage of students in the district with Hepatitis B vaccine
+ $ PctUpToDate     : Percentage of students with completely up-to-date vaccines
+ $ DistrictComplete: Boolean showing whether or not district’s reporting was complete
+ $ PctBeliefExempt : Percentage of all enrolled students with belief exceptions
+ $ PctMedicalExempt: Percentage of all enrolled students with medical exceptions
+ $ PctChildPoverty : Percentage of children in district living below the poverty line
+ $ PctFamilyPoverty: Percentage of families in district living below the poverty line
+ $ PctFreeMeal     : Percentage of students in the district receiving free or reduced cost meals
+ $ Enrolled        : Total number of enrolled students in the district
+ $ TotalSchools    : Total number of different schools in the district
+```
+
+_As might be expected, the data are quite skewed: districts range from 1 to 582 schools enrolling from 10 to more than 50,000 students. Further, while most districts have low rates of missing vaccinations, a handful are quite high. Be sure to note problems the data cause for the analysis and address any problems you can. _
+
+# Data Cleaning
+```{r}
+districts.filtered <- districts %>%
+  filter(PctUpToDate <= 100) %>%
+  filter(PctBeliefExempt <= 100) %>%
+  filter(PctMedicalExempt <= 100) %>%
+  filter(PctChildPoverty <= 100) %>%
+  filter(PctFamilyPoverty <= 100) %>%
+  filter(PctFreeMeal <= 100) # %>%
+  # filter(DistrictComplete != FALSE) 
+```
+
+
+# Run Data Cleaning diagnose 
+```{r}
+sum(is.na(districts.filtered))
+```
+
+
+```{r}
+# pairs panel on correlation
+pairs.panels(districts.filtered)
+
+# Violin plot to show distribution
+districts.filtered %>% pivot_longer(cols=-c(DistrictName,DistrictComplete), names_to = "variable",
+                           values_to = "value", values_drop_na = TRUE) %>%
+  ggplot(aes(x = variable, y = value)) + geom_violin() + facet_wrap(~variable, scales="free")
+
+# looking for outlier
+diagnose_outlier(districts.filtered)
+
+# plotting outlier
+plot_outlier(districts.filtered)
+```
+
+```{r}
+districts.filtered %>% filter(PctUpToDate < 40)
+
+```
+```{r}
+districts.diagnose <- districts.filtered %>% 
+  mutate(WithDTP_PctBelieveExempt   = WithDTP + PctBeliefExempt) %>%
+  mutate(WithPolio_PctBelieveExempt = WithPolio + PctBeliefExempt) %>%
+  mutate(WithMMR_PctBelieveExempt   = WithMMR + PctBeliefExempt) %>%
+  mutate(WithHepB_PctBelieveExempt  = WithHepB + PctBeliefExempt) %>%
+  mutate(WithDTP_PctMedicalExempt   = WithDTP + PctMedicalExempt) %>%
+  mutate(WithPolio_PctMedicalExempt = WithPolio + PctMedicalExempt) %>%
+  mutate(WithMMR_PctMedicalExempt   = WithMMR + PctMedicalExempt) %>%
+  mutate(WithHepB_PctMedicalExempt  = WithHepB + PctMedicalExempt) 
+```
+```{r}
+summary(districts.diagnose)
+```
+```{r}
+par(pty="s")
+plot(districts.filtered$PctChildPoverty, districts.filtered$PctFamilyPoverty,
+ylim = c(0,100),
+xlim = c(0,100))
+```
+```{r}
+lmout <- lm(PctChildPoverty ~ PctFamilyPoverty, districts.filtered)
+summary(lmout)
+```
+
+
+
+# Descriptive Reporting
+
+## 1.	_Basic Introductory Paragraph_
+
+_In your own words, write about three sentences of introduction addressing the staff member in the state legislators office. Frame the problem/topic that your report addresses._
+
+It is a fact that low vaccination rate will bring back dangerous disease such as Diphtheria, Polio, Measles and Hepatitis. This report will analysis the vaccination rate in California public school, how poverty, religious and medical factor effects them.
+
+
+
+
+
+
+
+## 2.	_Descriptive Overview of U.S. Vaccinations_
+
+_You have U.S. vaccination data going back 38 years, but the staff member is only interested in recent vaccination rates as a basis of comparison with California schools._ 
+
+### a.	_How have U.S. vaccination rates varied over time? _
+```{r}
+usVaccines.DTP1 <- as.data.frame(usVaccines)$DTP1 %>% ts( start= c(1980), frequency=1)
+usVaccines.HepB_BD <- as.data.frame(usVaccines)$HepB_BD %>% ts( start= c(1980), frequency=1)
+usVaccines.Pol3 <- as.data.frame(usVaccines)$Pol3 %>% ts( start= c(1980), frequency=1)
+usVaccines.Hib3 <- as.data.frame(usVaccines)$Hib3 %>% ts( start= c(1980), frequency=1)
+usVaccines.MCV1 <- as.data.frame(usVaccines)$MCV1 %>% ts( start= c(1980), frequency=1)
+
+par(mfrow=c(5,2),
+    oma=c(2,2,0,0)+0.1, 
+    mar=c(1,3,1,0)+0.1,
+    mgp=c(2,1,0), font.lab=2, cex.lab=1.1)
+
+usVaccines.DTP1.diff <-  diff(usVaccines.DTP1)
+usVaccines.DTP1.cp.mean <- cpt.mean(usVaccines.DTP1)
+usVaccines.DTP1.cp.mean %>% plot(main="Mean Changepoint Plot", ylab = "DTP")
+usVaccines.DTP1.cp.mean
+usVaccines.DTP1.cp.var <- cpt.var(usVaccines.DTP1.diff)
+usVaccines.DTP1.cp.var %>% plot(main="Variance Difference Plot",ylab = "")
+usVaccines.DTP1.cp.var
+
+usVaccines.HepB_BD.diff <-  diff(usVaccines.HepB_BD)
+usVaccines.HepB_BD.cp.mean <- cpt.mean(usVaccines.HepB_BD)
+usVaccines.HepB_BD.cp.mean %>% plot(ylab = "HepB_BD")
+usVaccines.HepB_BD.cp.mean
+usVaccines.HepB_BD.cp.var <- cpt.var(usVaccines.HepB_BD.diff)
+usVaccines.HepB_BD.cp.var %>% plot(ylab = "")
+usVaccines.HepB_BD.cp.var
+
+usVaccines.Pol3.diff <-  diff(usVaccines.Pol3)
+usVaccines.Pol3.cp.mean <- cpt.mean(usVaccines.Pol3)
+usVaccines.Pol3.cp.mean %>% plot(ylab = "Pol3")
+usVaccines.Pol3.cp.mean
+usVaccines.Pol3.cp.var <- cpt.var(usVaccines.Pol3.diff)
+usVaccines.Pol3.cp.var %>% plot(ylab = "")
+usVaccines.Pol3.cp.var
+
+usVaccines.Hib3.diff <-  diff(usVaccines.Hib3)
+usVaccines.Hib3.cp.mean <- cpt.mean(usVaccines.Hib3)
+usVaccines.Hib3.cp.mean %>% plot(ylab = "Hib3")
+usVaccines.Hib3.cp.mean
+usVaccines.Hib3.cp.var <- cpt.var(usVaccines.Hib3.diff)
+usVaccines.Hib3.cp.var %>% plot(ylab = "")
+usVaccines.Hib3.cp.var
+
+usVaccines.MCV1.diff <-  diff(usVaccines.MCV1)
+usVaccines.MCV1.cp.mean <- cpt.mean(usVaccines.MCV1)
+usVaccines.MCV1.cp.mean %>% plot(ylab = "MCV1")
+usVaccines.MCV1.cp.mean
+usVaccines.MCV1.cp.var <- cpt.var(usVaccines.MCV1.diff)
+usVaccines.MCV1.cp.var %>% plot(ylab = "")
+usVaccines.MCV1.cp.var
+```
+Fig 1 - US average Vaccination rate(in percentages) on Diphtheria/Pertussis/Tetanus(DTP), Hepatitis B(HepB_BD), Polio(Pol3), Influenza(Hib3) and Measles(MCV1)
+  
+Polio, Hib, MMR all have a great vaccination rate above 80 percent, and are relatively consistent, except at around 1985 - 1990 there is an drop in data. HepB_BD,and DTP had seen a increase from 85 to 95 and from 20 to 60. 
+
+```{r}
+summary(usVaccines.Hib3.cp.mean)
+```
+
+
+  
+  
+  
+### b.	_Are there notable trends or cyclical variation in U.S. vaccination rates?_
+  
+```{r}
+par(mfrow=c(2,3),mar=c(2,2,4,1)+0.1)
+
+acf(usVaccines.DTP1)
+acf(usVaccines.HepB_BD)
+acf(usVaccines.Pol3)
+acf(usVaccines.Hib3)
+acf(usVaccines.MCV1)
+```
+Fig 2.1 - Trend analysis On 5 type of vaccination rate in the US
+
+```{r}
+par(mfrow=c(2,3),mar=c(2,2,4,1)+0.1)
+
+acf(usVaccines.DTP1.diff)
+acf(usVaccines.HepB_BD.diff)
+acf(usVaccines.Pol3.diff)
+acf(usVaccines.Hib3.diff)
+acf(usVaccines.MCV1.diff)
+```
+Fig 2.2 - Seasonality analysis On 5 type of vaccination rate in the US
+
+
+
+
+
+
+
+
+### c.	_What are the mean U.S. vaccination rates when including only recent years in the calculation of the mean (examine your answers to the previous question to decide what a reasonable recent period is, i.e., a period during which the rates are relatively constant)?_
+
+```{r}
+usVaccines.recent <- window(usVaccines, start = c(1980,24)) 
+as.data.frame(usVaccines.recent) %>% colMeans()
+```
+
+
+
+
+
+
+
+
+## 3.	_Descriptive Overview of California Vaccinations_
+
+_Your districts dataset contains four variables that capture the individual vaccination rates by district: WithDTP, WithPolio, WithMMR, and WithHepB._
+
+### a.	_What are the mean levels of these variables across districts?_ 
+```{r}
+districts.filtered.withall <- districts.filtered %>% mutate(WithAll = (WithDTP + WithPolio + WithMMR + WithHepB)/4 )
+
+p1 <- districts.filtered.withall %>%
+  pivot_longer(cols=c(WithAll) , names_to = "variable",
+                           values_to = "value", values_drop_na = TRUE) %>%
+  ggplot(aes(x = variable, y = value)) + geom_violin() + geom_boxplot(width = 0.2) +
+    theme_minimal()
+
+p2 <- districts.filtered.withall %>%
+  ggplot(aes(x = WithAll)) + geom_histogram(color="black", fill="white", bins=30) +
+    geom_vline(aes(xintercept = mean(WithAll)),color="red") + 
+    theme_minimal()
+
+grid.arrange(p1,p2,nrow = 1,widths = c(1.5,2),
+  top = "Distribution of the average on four vaccine")
+```
+
+```{r}
+describe(districts.filtered)
+```
+
+
+
+### b.	_Among districts, how are the vaccination rates for individual vaccines related? In other words, if there are students with one vaccine, are students likely to have all of the others?_
+```{r}
+districts.filtered %>% dplyr::select(WithDTP, WithPolio, WithMMR, WithHepB) %>% pairs.panels()
+```
+Fig 3.1 - Four Type of Vaccination Correlation in California 
+
+```{r}
+districts.filtered %>% dplyr::select(WithDTP, WithPolio, WithMMR, WithHepB) %>% .^6 %>% pairs.panels()
+```
+Fig 3.2 - Four Type of Vaccination Correlation in California after power transformation
+
+
+```{r}
+districts.filtered.flattened <- districts.filtered %>% 
+  pivot_longer(cols=c(WithDTP, WithPolio, WithMMR, WithHepB), 
+               names_to = "vaccineType",
+               values_to = "value")
+  
+ggplot(districts.filtered.flattened,aes(x=vaccineType,y=value)) + geom_boxplot() +
+  theme_minimal()
+```
+Fig 3.3 - Box plots of Vaccination rate in California 
+
+```{r}
+aovOut <- aov(value^6 ~ vaccineType, districts.filtered.flattened)
+summary(aovOut)
+```
+The summary of the model have a p-value of 0.000037. We can confidently reject the null hypothesis and say there is a different of mean between these 4 groups Although we do not know which group are different, or even it's possible that all 4 groups are different. Cobain with the correlation graph(Fig 3.2) and the boxplot(Fig 3.3), my inference is the Hepatitis B vaccination rate are different with the other 3 groups. The Hepatitis B vaccine have a correlation from .92~.93, where the other groups are all above .95. 
+
+
+```{r}
+plot(aovOut,which=2)
+```
+Fig 3.4 - anova model residual after power 6 transformation  
+
+```{r}
+simulationOutput1 <- simulateResiduals(fittedModel = aovOut, n = 250)
+plot(simulationOutput1)
+```
+Fig 3.5 - DHARMa simulation of the anova model
+
+The simulation showed mostly normal distribution of the residuals
+
+
+
+
+
+
+### c.	_How do these Californian vaccination levels compare to U.S. vaccination levels (recent years only)? Note any patterns you notice. _ 
+
+```{r}
+usVaccines.last.DTP1 <- tail(usVaccines, n=1)[,1]
+usVaccines.last.HepB_BD <- tail(usVaccines, n=1)[,2]
+usVaccines.last.Pol3 <- tail(usVaccines, n=1)[,3]
+usVaccines.last.Hib3 <- tail(usVaccines, n=1)[,4]
+usVaccines.last.MCV1 <- tail(usVaccines, n=1)[,5]
+
+usVaccines.recent.DTP1 <- as.data.frame(usVaccines.recent)$DTP1 %>% mean()
+usVaccines.recent.HepB_BD <- as.data.frame(usVaccines.recent)$HepB_BD %>% mean()
+usVaccines.recent.Pol3 <- as.data.frame(usVaccines.recent)$Pol3 %>% mean()
+usVaccines.recent.Hib3 <- as.data.frame(usVaccines.recent)$Hib3 %>% mean()
+usVaccines.recent.MCV1 <- as.data.frame(usVaccines.recent)$MCV1 %>% mean()
+```
+
+```{r}
+districts.filtered.averages <- districts.filtered %>% 
+  pivot_longer(cols=c(WithDTP, WithPolio, WithHepB, WithMMR) , names_to = "variable",
+                           values_to = "value", values_drop_na = TRUE) %>% 
+  group_by(variable) %>%
+  summarise(mean = mean(value), median = median(value)) %>%
+  add_column(usRecentMean = c(usVaccines.recent.DTP1, 
+                              usVaccines.recent.HepB_BD,
+                              usVaccines.recent.MCV1,
+                              usVaccines.recent.Pol3))
+```
+
+```{r}
+districts.filtered.averages
+```
+
+```{r}
+districts.filtered %>% 
+  pivot_longer(cols=c(WithDTP, WithPolio, WithHepB, WithMMR) , names_to = "variable",
+                           values_to = "value", values_drop_na = TRUE) %>% 
+  ggplot(aes(x = variable, y = value)) + geom_violin() + facet_wrap(~variable, scales="free") +
+    geom_hline(data = districts.filtered.averages, aes(yintercept = median, color = 'CA Median')) + 
+    geom_hline(data = districts.filtered.averages, aes(yintercept = mean, color = 'CA Mean')) +
+    geom_hline(data = districts.filtered.averages, aes(yintercept = usRecentMean, color = 'US Mean', linetype=5)) +
+    scale_linetype_identity() +
+    theme_minimal() + 
+    theme(legend.title = element_blank()) +
+    scale_color_manual(values=c('red','orange','blue'))
+```
+Fig 4.1 - Violin plot on 4 types of vaccination rate in the CA distracts with California average(Red), California Median(Orange) and US average(Blue)
+
+```{r}
+districts.filtered %>% 
+  pivot_longer(cols=c(WithDTP, WithPolio, WithHepB, WithMMR) , names_to = "variable",
+                           values_to = "value", values_drop_na = TRUE) %>% 
+  ggplot(aes(x = variable, y = value)) + geom_boxplot() + facet_wrap(~variable, scales="free") +
+    geom_hline(data = districts.filtered.averages, aes(yintercept = mean, color = 'CA Mean')) +
+    geom_hline(data = districts.filtered.averages, aes(yintercept = usRecentMean, color = 'US Mean', linetype=5)) +
+    scale_linetype_identity() +
+    theme_minimal() + 
+    theme(legend.title = element_blank()) +
+    scale_color_manual(values=c('red','blue')) 
+```
+Fig 4.2 - Box plot on 4 types of vaccination rate in the CA distracts with California average(Red) and US average(Blue)
+
+
+## 4.	_Conclusion Paragraph for Vaccination Rates_
+
+_Provide one or two sentences of your professional judgment about where California school districts stand with respect to vaccination rates and in the larger context of the U.S._
+
+California have great vaccination rate in Hepatitis b, above average in MMR and Polio, and fall behind in DTP. However, for MMR and Polio, both have a mean below the US average and a median above the average. It means there are districts with lower vaccination rate that's dragging the average down. Therefore we should focus on the districts with low vaccination rates on MMR and Polio vaccine, and increase DTP vaccination rate in all districts. 
+
+
+# Inferential Reporting
+
+_For every item below except 7, use PctChildPoverty, PctFamilyPoverty, Enrolled, and TotalSchools as the four predictors. Explore the data and transform variables as necessary to improve prediction and/or interpretability. Be sure to include appropriate diagnostics and modify your analyses as appropriate. _ 
+ 
+## 5.	_Which of the four predictor variables predicts the percentage of all enrolled students with belief exceptions?_
+```{r}
+districts.filtered %>% 
+  pivot_longer(cols=c(PctChildPoverty, PctFamilyPoverty, Enrolled, TotalSchools, PctBeliefExempt) , names_to = "variable",
+                           values_to = "value", values_drop_na = TRUE) %>% 
+  ggplot(aes(x = variable, y = value)) + geom_violin() + facet_wrap(~variable, scales="free") +
+    theme_minimal() + 
+    theme(legend.title = element_blank())
+```
+
+```{r}
+districts.filtered %>% dplyr::select(PctChildPoverty, PctFamilyPoverty, Enrolled, TotalSchools, PctBeliefExempt) %>% pairs.panels()
+```
+```{r}
+districts.filtered.belief.log <- districts.filtered %>% dplyr::select(PctChildPoverty, PctFamilyPoverty, Enrolled, TotalSchools, PctBeliefExempt) %>% mutate_all(funs(log(.+1)))
+pairs.panels(districts.filtered.belief.log)
+```
+```{r}
+lmOut1 <- lm(PctBeliefExempt ~ PctChildPoverty + PctFamilyPoverty + Enrolled + TotalSchools, districts.filtered.belief.log)
+summary(lmOut1)
+plot(lmOut1)
+```
+Model result isn't great, the r^2 value is too low, and we have a point in Residuals vs Leverage graphs that's way out.
+
+```{r}
+vif(lmOut1)
+```
+VIF looks ok, but we have two variable that's over 5, but it's not larger than 10 we will leave it for now.
+
+
+
+```{r}
+districts.filtered %>% dplyr::select(DistrictName, PctChildPoverty, PctFamilyPoverty, Enrolled, TotalSchools, PctBeliefExempt) %>% .[280,]
+```
+```{r}
+plot(districts.filtered$PctFamilyPoverty,districts.filtered$PctChildPoverty)
+```
+We looked more in to the data point on index 280, the Mt. Baldy Joint Elementary school. There is a extreme ratio of percentage of child poverty verse percentage family poverty. At 45 percent, we will have 8 student out of 18 to be in child poverty while no family there are, I think this might be an outlier due to data collecting, but we cant take it out yet, more research needed. Because of the unsatisfied result, I'm going to add more columns. According to PPIC(Public Policy Institute of California), the age to be consider as a child is till 17. After some research, I will assume the data set that's provided to me is the K-12 education, therefore I'm going to mutate a new columns called `ChildPovertyEnrolled` by multiple them.
+
+```{r}
+districts.filtered.belief.count <- districts.filtered %>%  
+                                          mutate(ChildPovertyEnrolled = PctChildPoverty * Enrolled) %>%
+                                          dplyr::select(PctChildPoverty, PctFamilyPoverty, Enrolled, TotalSchools, PctBeliefExempt, ChildPovertyEnrolled) 
+pairs.panels(districts.filtered.belief.count)
+districts.filtered.belief.count.log <- log(districts.filtered.belief.count + 1)
+pairs.panels(districts.filtered.belief.count.log)
+```
+```{r}
+lmOut2 <- lm(PctBeliefExempt ~ ., districts.filtered.belief.count.log)
+summary(lmOut2)
+plot(lmOut2)
+```
+So the model is not better and we have 1 points on the l leverage graph that's almost out of the 0.5 value. I took a deeper look and the percentage of the belief exempt is at 59, which is the highest in the whole dataset.
+
+```{r}
+districts.filtered %>% dplyr::select(DistrictName, PctChildPoverty, PctFamilyPoverty, Enrolled, TotalSchools, PctBeliefExempt) %>% .[c(409,455),]
+```
+
+```{r}
+vif(lmOut2)
+```
+bad vif score we will need to drop some variables. 
+
+```{r}
+colnames(districts.filtered.belief.count.log)
+lmOut3 <- lm(PctBeliefExempt ~ PctChildPoverty+PctFamilyPoverty+TotalSchools+ChildPovertyEnrolled, districts.filtered.belief.count.log)
+summary(lmOut3)
+plot(lmOut3)
+vif(lmOut3)
+```
+
+
+Although both model1 and model3 all have significant p-value from the test, we are going to use the first model as the R^2 is better and it's easier to interpret.
+
+
+```{r}
+simulationOutput2 <- simulateResiduals(fittedModel = lmOut1, n = 250)
+plot(simulationOutput2)
+```
+One more test before the interpretation, The DHARMA simulation residual looks normal. 
+
+```{r}
+beta1 <- lm.beta(lm(PctBeliefExempt ~ PctChildPoverty + PctFamilyPoverty + Enrolled + TotalSchools, districts.filtered.belief.log))
+summary(beta1)
+```
+
+The two significant variables are the percentage of family poverty and the number of enrolled students. They are both negatively correlated to the percent of believe exceptions. It means the more poverty in the area, less believe exception and more enrolled students less believe exception. One thing to note is that all variables are log transformed, the real changes in percentage of the believe exception will be in log. So every 1 standard deviation increase in percentage of family poverty will have 0.453 standard deviation decrease in the log(percentage of belief exception).
+
+
+
+
+
+## 6.	_Which of the four predictor variables predicts the percentage of all enrolled students with completely up-to-date vaccines?_
+```{r}
+districts.filtered %>% 
+  pivot_longer(cols=c(PctChildPoverty, PctFamilyPoverty, Enrolled, TotalSchools, PctUpToDate) , names_to = "variable",
+                           values_to = "value", values_drop_na = TRUE) %>% 
+  ggplot(aes(x = variable, y = value)) + geom_violin() + facet_wrap(~variable, scales="free") +
+    theme_minimal() + 
+    theme(legend.title = element_blank())
+```
+```{r}
+districts.filtered.uptodate <- districts.filtered %>% dplyr::select(PctChildPoverty, PctFamilyPoverty, Enrolled, TotalSchools, PctUpToDate)
+pairs.panels(districts.filtered.uptodate)
+```
+```{r}
+districts.filtered.uptodate.transformed <- districts.filtered.uptodate %>% mutate(log_PctChildPoverty = log(PctChildPoverty),
+                                                                                    log_PctFamilyPoverty = log(PctFamilyPoverty+1),
+                                                                                    log_Enrolled = log(Enrolled),
+                                                                                    log_TotalSchools = log(TotalSchools),
+                                                                                    asin_PctUpToDate = asin(PctUpToDate/100)) %>% 
+                                                                             dplyr::select(log_PctChildPoverty, log_PctFamilyPoverty, log_Enrolled, log_TotalSchools, asin_PctUpToDate)
+pairs.panels(districts.filtered.uptodate.transformed)
+```
+```{r}
+lmOut4 <- lm(asin_PctUpToDate ~ ., districts.filtered.uptodate.transformed)
+summary(lmOut4)
+plot(lmOut4)
+```
+Model p-value is good, although the r^2 is not great, the significant variables are percentage of family poverty, enrolled students and total number of school in the districts. residuals and leverage also looks normal. 
+
+```{r}
+vif(lmOut4)
+```
+vif looks ok.
+
+```{r}
+simulationOutput3 <- simulateResiduals(fittedModel = lmOut4, n = 250)
+plot(simulationOutput3)
+```
+DHARMa simulation residual looks normal.
+
+```{r}
+beta2 <- lm.beta(lm(asin_PctUpToDate ~ ., districts.filtered.uptodate.transformed))
+summary(beta2)
+```
+There are three significant variables that predicts the percentage of up-to-date vaccines. The variables with the best predictive power is the percentage of family poverty, then the enrolled students, and the number of schools. Increasing in the percentage of family poverty and the number of enrolled students will increase the percentage of up-to-date vaccine, while increasing in total number of school will result in decrease of the percentage of up-to-date vaccine.
+
+
+## 7.	_Using any set of predictors that you want to use, what’s the best R-squared you can achieve in predicting the percentage of all enrolled students with completely up-to-date vaccines while still having an acceptable regression?_
+```{r}
+p1 <- districts.filtered.uptodate %>%
+  pivot_longer(cols=c(PctUpToDate) , names_to = "variable",
+                           values_to = "value", values_drop_na = TRUE) %>%
+  ggplot(aes(x = variable, y = value)) + geom_violin() + geom_boxplot(width = 0.2) +
+    theme_minimal()
+
+p2 <- districts.filtered.withall %>%
+  ggplot(aes(x = PctUpToDate, y=..density..)) + 
+    geom_histogram(color="black", fill="white", bins=30) +
+    geom_density(alpha=.2, fill="#FF6666") + 
+    theme_minimal()
+
+p3 <- districts.filtered.withall %>%
+  ggplot(aes(x = PctUpToDate^8, y=..density..)) + 
+    geom_histogram(color="black", fill="white", bins=30) +
+    geom_density(alpha=.2, fill="#FF6666") + 
+    theme_minimal()
+
+grid.arrange(p1,p2,p3,nrow = 1,widths = c(1.5,2,2),
+  top = "Distribution of the Percentage on Up to date vaccine")
+```
+We will look at the distribution of the dependent variables first, it's very left skewed. 
+
+
+```{r}
+districts.filtered.all.features <- subset(districts.filtered, select = -c(DistrictName))
+
+lmOut5 <- lm(PctUpToDate~. , districts.filtered.all.features)
+summary(lmOut5)
+plot(lmOut5)  
+```
+```{r}
+districts.filtered.all.features <- districts.filtered %>% dplyr::select(PctBeliefExempt, WithHepB, WithDTP, WithMMR, WithPolio, PctChildPoverty, Enrolled, PctUpToDate) %>% mutate( 
+                                             WithDTP_HepB_MMR = ((WithDTP + WithMMR + WithHepB)/3))
+pairs.panels(districts.filtered.all.features)
+```
+
+
+
+```{r}
+lmOut6 <- lm(PctUpToDate ~ WithDTP_HepB_MMR + PctBeliefExempt + Enrolled + PctBeliefExempt * Enrolled + PctChildPoverty + Enrolled * PctChildPoverty, districts.filtered.all.features)
+summary(lmOut6)
+plot(lmOut6)
+```
+In this model we took the average of three vaccines, WithDTP, WithMMR, and WithHepB as the polio is not that significant in predicting the total up to date result. I also put in Belief Exempt, Enrolled, Child Poverty and interation between enrolled and child poverty, enrolled with belief Exempt. They are not significant for this model. I put them in because it gives 0.01 increase in the Adjusted R^2. Overall we got an Adjusted R^2 value of 0.9546. The residuals vs Fitted graphs looks normal. The Q-Q plot showed there are some point that's not on the line, same as the Leverage plot where we have 186 way outside of the 1.0 standard deviation, but the line is still normal. We will need look into these point more to see if its an outlier below. 
+
+```{r}
+simulationOutput4 <- simulateResiduals(fittedModel = lmOut6, n = 500)
+plot(simulationOutput4)
+```
+The simulated residual does not look great. The test think there might be outliers. Also our dependent variables are not a normal distribution when we fit the model. This can also cause problems in the simulations.
+
+```{r}
+vif(lmOut6)
+```
+All the variable are have a vif score under 10, we can keep them.
+
+
+```{r}
+districts.filtered.all.features %>% .[c(204,186),]
+```
+```{r}
+plot(districts.filtered.all.features$PctUpToDate,districts.filtered.all.features$WithDTP_HepB_MMR)
+text(68,93,"204",col='red')
+```
+The point 204, Sausalito Marin City, is out side of the normal trend. From Google this place shows up as a tourist place, nothing special other then that. We need more information to find out if it's an outlier.
+
+```{r}
+districts.filtered.all.features %>%
+  pivot_longer(cols=c(WithHepB, WithDTP, WithMMR, WithDTP_HepB_MMR) , names_to = "variable",
+                           values_to = "value", values_drop_na = TRUE) %>%
+  ggplot(aes(x = variable, y = value)) + geom_violin() + geom_boxplot(width = 0.2) +
+    theme_minimal()
+```
+Point 186, Trinidad Union Elementary, showed up way off the leverage plot, therefore are classified as outlier in diagnose analysis. No special information from google, need more investigation.
+
+
+
+## 8.	_In predicting the percentage of all enrolled students with completely up-to-date vaccines, is there an interaction between PctChildPoverty and Enrolled?_
+From the previous model. We can confidently say there is no significant evidence that PctChildPoverty, Enrolled, nor an interation variable between PctChildPoverty and Enrolled predicts the percentage of all enrolled students with completely up-to-date vaccines.
+
+
+## 9.	_Which, if any, of the four predictor variables predict whether or not a district’s reporting was complete?_
+```{r}
+districts.filtered.completed <- subset(districts.filtered, select = -c(DistrictName))
+
+glmOut1 <- glm(DistrictComplete~. , family = binomial(), districts.filtered.completed)
+summary(glmOut1)
+model_performance(glmOut1)
+```
+We ran a model that used all the variables, the performance indicates model is only fitting one side of the label as the score_log is -inf. So we gonna try with less variables and see if there is a better result. 
+
+```{r}
+
+glmOut2 <- glm(DistrictComplete~ TotalSchools + PctFreeMeal + PctFamilyPoverty, family = binomial(), districts.filtered.completed)
+summary(glmOut2)
+model_performance(glmOut2)
+```
+Still the same results with less variables.
+
+```{r}
+simulationOutput6 <- simulateResiduals(fittedModel = glmOut2, n = 250)
+plot(simulationOutput6)
+```
+The simulation residual look normal.
+
+```{r}
+check_model(glmOut2)
+```
+The model has bad residuals, it only fitted one side of the data. we are going to try with MCMC simulations.
+
+```{r}
+bayesLogitOut1 <- MCMClogit(DistrictComplete~., districts.filtered.completed)
+summary(bayesLogitOut1)
+```
+There are three variables that did not cross 0, but it's really really close to overlay on 0, therefore we need to test with these variables alone.
+
+```{r}
+bayesLogitOut2 <- MCMClogit(DistrictComplete~ TotalSchools+PctFreeMeal+PctFamilyPoverty, districts.filtered.completed)
+summary(bayesLogitOut2)
+```
+```{r}
+par(mar=c(2,1,2,1))
+plot(bayesLogitOut2)
+```
+The simulations showed no good results here, and we can't not make a confusion matrix because the model did not fit both side of the data. With these data and model we can conclude there is no predictor that indicates if the district had completed reporting.
+
+
+
+## 10.	_Concluding Paragraph_
+
+_Describe your conclusions, based on all of the foregoing analyses. As well, the staff member in the state legislator’s office is interested to know how to allocate financial assistance to school districts to improve both their vaccination rates and their reporting compliance. Make sure you have at least one sentence that makes a recommendation about improving vaccination rates. Make sure you have at least one sentence that makes a recommendation about improving reporting rates. Finally, say what further analyses might be helpful to answer these questions and any additional data you would like to have. _
+
+
+
+
+## reference
+_https://www.cdc.gov/vaccines/vac-gen/whatifstop.htm_
